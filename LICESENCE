@@ -1,4 +1,4 @@
-Hostman simple etcd management for your docker containers
+Hostman is a simple `/etc/hosts/` management solution for your docker containers
 Copyright © 2019 Shalom Yiblet
 
 This program is free software: you can redistribute it and/or modify
