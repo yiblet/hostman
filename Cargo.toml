@@ -3,4 +3,5 @@
 members = [
   "hostman-server",
   "hostman-client",
+  "hostman-shared",
 ]
