@@ -6,20 +6,16 @@ extern crate clap;
 extern crate serde;
 extern crate serde_json;
 extern crate sled;
+extern crate hostman_shared;
 
 use std::{
     borrow::Borrow,
-    collections::BTreeMap,
     sync::{Arc, Mutex, MutexGuard},
 };
 
 use clap::{App, Arg};
-use serde::{Deserialize, Serialize};
+use hostman_shared::Table;
 
-#[derive(Serialize, Deserialize, Default)]
-struct Table {
-    host_mapping: BTreeMap<String, String>,
-}
 
 type Db = Arc<Mutex<sled::Db>>;
 
