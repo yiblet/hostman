@@ -285,37 +285,6 @@ mod tests {
     use combine::EasyParser;
 
     #[test]
-    fn simple_parse_hostman_test() {
-        let test: &'static str = "\
-                                  # hostman:start\n\
-                                  127.0.0.1       localhost\n\
-                                  ::1             localhost\n\
-                                  127.0.1.1       domain.local pop-os\n\
-                                  # hostman:end\n\
-                                  ";
-
-        let mut lines = parse_lines().easy_parse(test).map(|x| x.0).unwrap();
-
-        // assert_eq!(
-        //     ,
-        //     Ok(vec![
-        //         Line::Domain {
-        //             ip: "127.0.0.1".to_owned(),
-        //             aliases: vec!["localhost".to_owned()]
-        //         },
-        //         Line::Domain {
-        //             ip: "::1".to_owned(),
-        //             aliases: vec!["localhost".to_owned()]
-        //         },
-        //         Line::Domain {
-        //             ip: "127.0.1.1".to_owned(),
-        //             aliases: vec!["domain.local".to_owned(), "pop-os".to_owned()]
-        //         },
-        //     ])
-        // );
-    }
-
-    #[test]
     fn parse_hostman_test() {
         let test: &'static str = "\
                                   # hostman:start\n\
