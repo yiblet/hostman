@@ -16,3 +16,4 @@ hostman-shared = { version = "*", path = "../hostman-shared" }
 combine = "4.0.0-beta.1"
 sys-info = "0.5.8"
 pnet = "0.22.0"
+clap = "2.33.0"

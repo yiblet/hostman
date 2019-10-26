@@ -3,19 +3,19 @@
 #[macro_use]
 extern crate rocket;
 extern crate clap;
+extern crate hostman_shared;
 extern crate serde;
 extern crate serde_json;
 extern crate sled;
-extern crate hostman_shared;
+
+mod cli;
 
 use std::{
     borrow::Borrow,
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use clap::{App, Arg};
 use hostman_shared::Table;
-
 
 type Db = Arc<Mutex<sled::Db>>;
 
@@ -73,31 +73,7 @@ fn get(db: rocket::State<Db>) -> String {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let matches = App::new("Hostman Server")
-        .version("0.1")
-        .author("Shalom Yiblet <shalom.yiblet@gmail.com>")
-        .arg(
-            Arg::with_name("LOCATION")
-                .help("Sets the input file to use")
-                .index(1),
-        )
-        .arg(
-            Arg::with_name("port")
-                .help("sets the port")
-                .long("port")
-                .short("p")
-                .default_value("15332")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("host")
-                .help("sets the host")
-                .long("host")
-                .short("h")
-                .default_value("0.0.0.0")
-                .takes_value(true),
-        )
-        .get_matches();
+    let matches = cli::get_matches();
 
     let location: &str = matches.value_of("LOCATION").unwrap_or("/tmp/db");
 
