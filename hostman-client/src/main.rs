@@ -1,3 +1,5 @@
+// extern crates
+extern crate clap;
 extern crate combine;
 extern crate hostman_shared;
 extern crate pnet;
@@ -7,12 +9,20 @@ extern crate serde_json;
 extern crate sys_info;
 extern crate tokio;
 
-use combine::{ParseError, Parser};
+// modules
+pub mod cli;
+pub mod parsing;
+
+// imports
+use crate::parsing::{parse_lines, Line, Lines};
 use hostman_shared::{Current, Table};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let file_loc = "hosts";
+    let matches = cli::get_matches();
+    let file_loc = matches
+        .value_of(cli::HOSTS_FILE)
+        .ok_or("must include hosts file")?;
     let table = read_hosts(file_loc).await;
 
     let body;
@@ -92,113 +102,6 @@ async fn write_table(table: &Table, file_name: &str) -> Result<(), Box<dyn std::
     Ok(())
 }
 
-#[derive(Debug, PartialEq, Clone)]
-enum Line {
-    Comment(String),
-    Domain { ip: String, aliases: Vec<String> },
-}
-
-impl Line {
-    fn is_comment(&self) -> bool {
-        match self {
-            Self::Comment(_) => true,
-            _ => false,
-        }
-    }
-    fn is_domain(&self) -> bool {
-        match self {
-            Self::Domain { .. } => true,
-            _ => false,
-        }
-    }
-}
-
-type Lines = Vec<Line>;
-
-#[inline]
-fn parse_domain<Input>() -> impl Parser<Input, Output = Line>
-where
-    Input: combine::stream::Stream<Token = char>,
-    Input::Error: ParseError<Input::Token, Input::Range, Input::Position>,
-{
-    // TODO(shalom) change this to a regex that matches for ipv4 and ipv6
-    let ipv4 =
-        combine::many1(combine::satisfy(|c: char| c.is_digit(10) || c == '.')).expected("ipv4");
-    let ipv6 =
-        combine::many1(combine::satisfy(|c: char| c.is_digit(16) || c == ':')).expected("ipv6");
-
-    let alias = combine::many1(
-        combine::many1(combine::satisfy(|c: char| !c.is_whitespace())).skip(
-            combine::skip_many(combine::satisfy(|c: char| *&['\t', ' '].contains(&c)))
-                .expected("alias delimiter"),
-        ),
-    );
-    ipv4.or(ipv6)
-        .skip(combine::parser::char::spaces())
-        .and(alias)
-        .map(|x| Line::Domain {
-            ip: x.0,
-            aliases: x.1,
-        })
-}
-
-#[inline]
-fn parse_comment<Input>() -> impl Parser<Input, Output = Line>
-where
-    Input: combine::stream::Stream<Token = char>,
-    Input::Error: ParseError<Input::Token, Input::Range, Input::Position>,
-{
-    combine::parser::char::char('#')
-        .with(combine::many(combine::satisfy(|c| c != '\n')))
-        .map(Line::Comment)
-}
-
-fn parse_line<Input>() -> impl Parser<Input, Output = Line>
-where
-    Input: combine::stream::Stream<Token = char>,
-    Input::Error: ParseError<Input::Token, Input::Range, Input::Position>,
-{
-    parse_comment().or(parse_domain())
-}
-
-fn parse_lines<Input>() -> impl Parser<Input, Output = Lines>
-where
-    Input: combine::stream::Stream<Token = char>,
-    Input::Error: ParseError<Input::Token, Input::Range, Input::Position>,
-{
-    combine::many(parse_line().skip(combine::parser::char::char('\n')))
-}
-
-fn parse_hostman_lines<Input>() -> impl Parser<Input, Output = Lines>
-where
-    Input: combine::stream::Stream<Token = char>,
-    Input::Error: ParseError<Input::Token, Input::Range, Input::Position>,
-{
-    let parse_line_br = || parse_line().skip(combine::parser::char::char('\n'));
-
-    // combine::many(parse_line_br())
-
-    combine::many::<Vec<_>, _, _>(combine::attempt(parse_line_br().then(|line: Line| {
-        println!("{:?}", line);
-        if line != Line::Comment(" hostman:start".to_owned()) {
-            combine::value(line).left()
-        } else {
-            combine::unexpected_any("failure").right()
-        }
-    })))
-    .skip(parse_line_br())
-    .with(combine::many::<Vec<_>, _, _>(combine::attempt(
-        parse_line_br().then(|line: Line| {
-            println!("{:?}", line);
-            if line != Line::Comment(" hostman:end".to_owned()) {
-                combine::value(line).left()
-            } else {
-                combine::unexpected_any("failure").right()
-            }
-        }),
-    )))
-}
-
 fn splice_hostman_lines(lines: &Lines) -> Option<std::ops::Range<usize>> {
     let start_idx = lines
         .iter()
@@ -216,8 +119,11 @@ fn splice_hostman_lines(lines: &Lines) -> Option<std::ops::Range<usize>> {
 }
 
 fn gen_lines(file_contents: &str) -> Result<Lines, Box<dyn std::error::Error>> {
-    use combine::stream::buffered;
-    use combine::stream::position;
+    use combine::{
+        stream::{buffered, position},
+        Parser,
+    };
+
     let positioned =
         position::Stream::with_positioner(file_contents, position::SourcePosition::default());
     let mut stream = buffered::Stream::new(positioned, 256);
@@ -277,158 +183,4 @@ async fn read_hosts(file_name: &str) -> Result<Table, Box<dyn std::error::Error>
 
     let file_contents = std::str::from_utf8(contents.as_slice())?;
     gen_table(file_contents)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use combine::EasyParser;
-
-    #[test]
-    fn parse_hostman_test() {
-        let test: &'static str = "\
-                                  # hostman:start\n\
-                                  127.0.0.1       localhost\n\
-                                  ::1             localhost\n\
-                                  127.0.1.1       domain.local pop-os\n\
-                                  # hostman:end\n\
-                                  ";
-
-        assert_eq!(
-            parse_hostman_lines().easy_parse(test).map(|x| x.0),
-            Ok(vec![
-                Line::Domain {
-                    ip: "127.0.0.1".to_owned(),
-                    aliases: vec!["localhost".to_owned()]
-                },
-                Line::Domain {
-                    ip: "::1".to_owned(),
-                    aliases: vec!["localhost".to_owned()]
-                },
-                Line::Domain {
-                    ip: "127.0.1.1".to_owned(),
-                    aliases: vec!["domain.local".to_owned(), "pop-os".to_owned()]
-                },
-            ])
-        );
-
-        let test: &'static str = "\
-                                  127.0.0.1       localhost\n\
-                                  # hostman:start\n\
-                                  127.0.0.1       localhost\n\
-                                  ::1             localhost\n\
-                                  127.0.1.1       domain.local pop-os\n\
-                                  # hostman:end\n\
-                                  127.0.0.1       localhost\n\
-                                  ::1             localhost\n\
-                                  127.0.1.1       domain.local pop-os\n\
-                                  ";
-
-        assert_eq!(
-            parse_hostman_lines().easy_parse(test).map(|x| x.0),
-            Ok(vec![
-                Line::Domain {
-                    ip: "127.0.0.1".to_owned(),
-                    aliases: vec!["localhost".to_owned()]
-                },
-                Line::Domain {
-                    ip: "::1".to_owned(),
-                    aliases: vec!["localhost".to_owned()]
-                },
-                Line::Domain {
-                    ip: "127.0.1.1".to_owned(),
-                    aliases: vec!["domain.local".to_owned(), "pop-os".to_owned()]
-                },
-            ])
-        );
-    }
-
-    #[test]
-    fn parse_domains_test() {
-        let test: &'static str = "\
-                                  127.0.0.1       localhost\n\
-                                  ::1             localhost\n\
-                                  127.0.1.1       domain.local pop-os\n\
-                                  ";
-
-        assert_eq!(
-            parse_lines().easy_parse(test).map(|x| x.0),
-            Ok(vec![
-                Line::Domain {
-                    ip: "127.0.0.1".to_owned(),
-                    aliases: vec!["localhost".to_owned()]
-                },
-                Line::Domain {
-                    ip: "::1".to_owned(),
-                    aliases: vec!["localhost".to_owned()]
-                },
-                Line::Domain {
-                    ip: "127.0.1.1".to_owned(),
-                    aliases: vec!["domain.local".to_owned(), "pop-os".to_owned()]
-                },
-            ])
-        )
-    }
-
-    #[test]
-    fn parse_domains_with_comment_test() {
-        let test: &'static str = "\
-                                  127.0.0.1       localhost\n\
-                                  # 127.0.0.1       localhost\n\
-                                  ::1             localhost\n\
-                                  127.0.1.1       domain.local pop-os\n\
-                                  ";
-
-        assert_eq!(
-            parse_lines().easy_parse(test).map(|x| x.0),
-            Ok(vec![
-                Line::Domain {
-                    ip: "127.0.0.1".to_owned(),
-                    aliases: vec!["localhost".to_owned()]
-                },
-                Line::Comment(" 127.0.0.1       localhost".to_owned()),
-                Line::Domain {
-                    ip: "::1".to_owned(),
-                    aliases: vec!["localhost".to_owned()]
-                },
-                Line::Domain {
-                    ip: "127.0.1.1".to_owned(),
-                    aliases: vec!["domain.local".to_owned(), "pop-os".to_owned()]
-                },
-            ])
-        )
-    }
-
-    #[test]
-    fn parse_domain_test() {
-        assert_eq!(
-            parse_domain()
-                .easy_parse("127.0.0.1       localhost")
-                .map(|x| x.0),
-            Ok(Line::Domain {
-                ip: "127.0.0.1".to_owned(),
-                aliases: vec!["localhost".to_owned()]
-            })
-        );
-
-        assert_eq!(
-            parse_domain()
-                .easy_parse("127.0.0.1       localhost local")
-                .map(|x| x.0),
-            Ok(Line::Domain {
-                ip: "127.0.0.1".to_owned(),
-                aliases: vec!["localhost".to_owned(), "local".to_owned()]
-            })
-        );
-
-        assert_eq!(
-            parse_domain()
-                .easy_parse("::1       localhost local")
-                .map(|x| x.0),
-            Ok(Line::Domain {
-                ip: "::1".to_owned(),
-                aliases: vec!["localhost".to_owned(), "local".to_owned()]
-            })
-        );
-    }
 }
