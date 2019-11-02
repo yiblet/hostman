@@ -2,6 +2,7 @@
 extern crate clap;
 extern crate combine;
 extern crate hostman_shared;
+extern crate ipnetwork;
 extern crate pnet;
 extern crate reqwest;
 extern crate serde;
@@ -17,13 +18,25 @@ pub mod parsing;
 use crate::parsing::{parse_lines, Line, Lines};
 use hostman_shared::{Current, Table};
 
+struct Configs {
+    network: Option<ipnetwork::IpNetwork>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = cli::get_matches();
     let file_loc = matches
         .value_of(cli::HOSTS_FILE)
         .ok_or("must include hosts file")?;
-    let table = read_hosts(file_loc).await;
+
+    let configs = Configs {
+        network: matches
+            .value_of(cli::NETWORK)
+            .map(|ipnet| ipnet.parse())
+            .transpose()?,
+    };
+
+    let table = read_hosts(&configs, file_loc).await;
 
     let body;
     if let Some(current) = table.map(|table| table.current)? {
@@ -31,7 +44,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "http://localhost:15332/update/{}/{}/",
             &current.host, &current.ips[0],
         );
-
         body = reqwest::get(&req).await?.text().await?;
     } else {
         body = reqwest::get("http://localhost:15332/get")
@@ -41,8 +53,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let table: Table = serde_json::from_str(body.as_ref())?;
-    println!("body = {:?}", table);
     write_table(&table, file_loc).await?;
+    println!("body = {:?}", table);
     Ok(())
 }
 
@@ -58,6 +70,18 @@ async fn write_table(table: &Table, file_name: &str) -> Result<(), Box<dyn std::
 
     let mut out_file = tokio::fs::File::create(file_name).await?;
 
+    // this lambda is split out to reduce code copying
+    let lines_output = |table: &Table| -> String {
+        let mut buffer = String::new();
+        for (host, ip) in table.host_mapping.iter() {
+            buffer += ip;
+            buffer.push('\t');
+            buffer += host;
+            buffer.push('\n');
+        }
+        buffer
+    };
+
     match range_opt {
         // TODO(shalom) clean this up
         Some(range) => {
@@ -67,14 +91,8 @@ async fn write_table(table: &Table, file_name: &str) -> Result<(), Box<dyn std::
                 out_file.write(line.as_bytes()).await?;
                 out_file.write("\n".as_bytes()).await?;
             }
-            for (host, ip) in table.host_mapping.iter() {
-                let mut buffer = String::new();
-                buffer += ip;
-                buffer.push('\t');
-                buffer += host;
-                buffer.push('\n');
-                out_file.write(buffer.as_bytes()).await?;
-            }
+            let buffer = lines_output(table);
+            out_file.write(buffer.as_bytes()).await?;
             for line in file_contents.lines().skip(range.end) {
                 out_file.write(line.as_bytes()).await?;
                 out_file.write("\n".as_bytes()).await?;
@@ -86,14 +104,8 @@ async fn write_table(table: &Table, file_name: &str) -> Result<(), Box<dyn std::
                 out_file.write("\n".as_bytes()).await?;
             }
             out_file.write("# hostman:start\n".as_bytes()).await?;
-            for (host, ip) in table.host_mapping.iter() {
-                let mut buffer = String::new();
-                buffer += ip;
-                buffer.push('\t');
-                buffer += host;
-                buffer.push('\n');
-                out_file.write(buffer.as_bytes()).await?;
-            }
+            let buffer = lines_output(table);
+            out_file.write(buffer.as_bytes()).await?;
             out_file.write("# hostman:end\n".as_bytes()).await?;
         }
     }
@@ -135,7 +147,7 @@ fn gen_lines(file_contents: &str) -> Result<Lines, Box<dyn std::error::Error>> {
         .map(|tup| tup.0)
 }
 
-fn gen_table(file_contents: &str) -> Result<Table, Box<dyn std::error::Error>> {
+fn gen_table(configs: &Configs, file_contents: &str) -> Result<Table, Box<dyn std::error::Error>> {
     let lines = gen_lines(file_contents)?;
     let mut table = Table::default();
     if let Some(range) = splice_hostman_lines(&lines) {
@@ -153,15 +165,19 @@ fn gen_table(file_contents: &str) -> Result<Table, Box<dyn std::error::Error>> {
 
     let hostname = sys_info::hostname()?;
 
-    let ips: Vec<_> = pnet::datalink::interfaces()
+    let ifaces = pnet::datalink::interfaces();
+    let ip_iter = ifaces
         .iter()
         .flat_map(|iface| iface.ips.iter())
-        .filter(|ipnet| {
-            ipnet.is_ipv4()
-                && ipnet.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
-        })
-        .map(|ipnet| ipnet.ip().to_string())
-        .collect();
+        .filter(|ipnet| ipnet.is_ipv4() && !ipnet.ip().is_loopback());
+
+    let ips: Vec<_> = match configs.network {
+        Some(ipnet) => ip_iter
+            .filter(|ip| ipnet.contains(ip.ip()))
+            .map(|ipnet| ipnet.ip().to_string())
+            .collect(),
+        _ => ip_iter.map(|ipnet| ipnet.ip().to_string()).collect(),
+    };
 
     if ips.len() != 0 {
         table.current = Some(Current {
@@ -173,7 +189,10 @@ fn gen_table(file_contents: &str) -> Result<Table, Box<dyn std::error::Error>> {
     Ok(table)
 }
 
-async fn read_hosts(file_name: &str) -> Result<Table, Box<dyn std::error::Error>> {
+async fn read_hosts(
+    configs: &Configs,
+    file_name: &str,
+) -> Result<Table, Box<dyn std::error::Error>> {
     use tokio::prelude::*;
 
     let mut contents = vec![];
@@ -182,5 +201,5 @@ async fn read_hosts(file_name: &str) -> Result<Table, Box<dyn std::error::Error>
     file.read_to_end(&mut contents).await?;
 
     let file_contents = std::str::from_utf8(contents.as_slice())?;
-    gen_table(file_contents)
+    gen_table(configs, file_contents)
 }
