@@ -1,0 +1,8 @@
+FROM liuchong/rustup:nightly
+
+# RUN apk add curl
+# RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable -y
+
+COPY . .
+WORKDIR /root/hostman-client
+RUN cargo build --release
